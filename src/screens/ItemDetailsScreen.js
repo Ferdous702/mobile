@@ -1,406 +1,386 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   View,
   Text,
   ScrollView,
   StyleSheet,
-  Image,
-  Alert,
   Modal,
-  TouchableOpacity,
-  TextInput,
+  Pressable,
+  KeyboardAvoidingView,
   Platform,
+  useWindowDimensions,
 } from 'react-native';
-import DateTimePicker from '@react-native-community/datetimepicker';
+import { useFocusEffect } from '@react-navigation/native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { Ionicons } from '@expo/vector-icons';
 import { api } from '../utils/api';
-import { STORAGE_URL } from '../config/api';
-import { LoadingScreen } from '../components/LoadingScreen';
-import { Button } from '../components/Button';
+import { imageUrl } from '../config/api';
 import { useAuth } from '../contexts/AuthContext';
+import { useDialog } from '../contexts/DialogContext';
+import { Button, IconButton } from '../components/Button';
+import { Input } from '../components/Input';
+import { DateField } from '../components/DateField';
+import { Card } from '../components/Card';
+import { Avatar, ItemImage, PriceTag, ErrorState, Loader } from '../components/UI';
+import { toYMD, parseYMD, formatRange, daysBetween } from '../utils/format';
+import { colors, typography, spacing, radius, CONTENT_MAX_WIDTH } from '../theme';
+
+const addDays = (d, n) => {
+  const x = new Date(d);
+  x.setDate(x.getDate() + n);
+  return x;
+};
 
 export const ItemDetailsScreen = ({ route, navigation }) => {
-  const { itemId } = route.params;
+  const { itemId } = route.params || {};
   const { user } = useAuth();
+  const { toast } = useDialog();
+  const insets = useSafeAreaInsets();
+  const { width } = useWindowDimensions();
+  const contentWidth = Math.min(width, CONTENT_MAX_WIDTH);
+
   const [item, setItem] = useState(null);
   const [loading, setLoading] = useState(true);
-  const [showRequestModal, setShowRequestModal] = useState(false);
-  const [startDate, setStartDate] = useState(new Date());
-  const [endDate, setEndDate] = useState(new Date());
+  const [error, setError] = useState('');
+  const [imageIndex, setImageIndex] = useState(0);
+  const carouselRef = useRef(null);
+
+  const [sheetOpen, setSheetOpen] = useState(false);
+  const [startDate, setStartDate] = useState(toYMD(new Date()));
+  const [endDate, setEndDate] = useState(toYMD(addDays(new Date(), 1)));
   const [notes, setNotes] = useState('');
+  const [formError, setFormError] = useState('');
   const [submitting, setSubmitting] = useState(false);
-  const [showStartPicker, setShowStartPicker] = useState(false);
-  const [showEndPicker, setShowEndPicker] = useState(false);
 
-  useEffect(() => {
-    loadItem();
-  }, [itemId]);
-
-  const loadItem = async () => {
+  const loadItem = useCallback(async () => {
+    if (!itemId) {
+      setError('No item selected.');
+      setLoading(false);
+      return;
+    }
     try {
       const response = await api.getItem(itemId);
-      if (response.success) {
-        setItem(response.data);
-      }
-    } catch (error) {
-      Alert.alert('Error', 'Failed to load item details');
-      navigation.goBack();
+      setItem(response.data);
+      setError('');
+    } catch (err) {
+      setError(err.message);
     } finally {
       setLoading(false);
     }
+  }, [itemId]);
+
+  // Reload on focus so edits made on the form screen show up
+  useFocusEffect(
+    useCallback(() => {
+      loadItem();
+    }, [loadItem])
+  );
+
+  useEffect(() => {
+    if (item?.title) navigation.setOptions({ title: item.title });
+  }, [item?.title, navigation]);
+
+  const openSheet = () => {
+    setFormError('');
+    setSheetOpen(true);
   };
 
-  const formatDate = (date) => {
-    return date.toISOString().split('T')[0];
+  const validate = () => {
+    const start = parseYMD(startDate);
+    const end = parseYMD(endDate);
+    const today = parseYMD(toYMD(new Date()));
+    if (!start || !end) return 'Please select both a start and end date.';
+    if (start < today) return 'Start date cannot be in the past.';
+    if (end < start) return 'End date must be on or after the start date.';
+
+    for (const b of item?.booked_dates || []) {
+      const bs = parseYMD(b.start_date);
+      const be = parseYMD(b.end_date);
+      if (start <= be && end >= bs) {
+        return `Already booked ${formatRange(b.start_date, b.end_date)}. Please choose other dates.`;
+      }
+    }
+    return '';
   };
 
   const handleSubmitRequest = async () => {
-    if (startDate >= endDate) {
-      Alert.alert('Error', 'End date must be after start date');
-      return;
-    }
-
-    // Check for conflicts with booked dates
-    const bookedDates = item.booked_dates || [];
-    const requestStart = startDate.getTime();
-    const requestEnd = endDate.getTime();
-
-    for (const booking of bookedDates) {
-      const bookStart = new Date(booking.start_date).getTime();
-      const bookEnd = new Date(booking.end_date).getTime();
-
-      if (
-        (requestStart >= bookStart && requestStart <= bookEnd) ||
-        (requestEnd >= bookStart && requestEnd <= bookEnd) ||
-        (requestStart <= bookStart && requestEnd >= bookEnd)
-      ) {
-        Alert.alert(
-          'Dates Unavailable',
-          `This item is already booked from ${booking.start_date} to ${booking.end_date}`
-        );
-        return;
-      }
-    }
+    const msg = validate();
+    setFormError(msg);
+    if (msg) return;
 
     setSubmitting(true);
     try {
-      const response = await api.createBorrowRequest(
-        itemId,
-        formatDate(startDate),
-        formatDate(endDate),
-        notes
-      );
-
-      if (response.success) {
-        Alert.alert('Success', 'Borrow request submitted successfully');
-        setShowRequestModal(false);
-        setNotes('');
-      }
-    } catch (error) {
-      Alert.alert('Error', error.message || 'Failed to submit request');
+      await api.createBorrowRequest(itemId, startDate, endDate, notes.trim());
+      setSheetOpen(false);
+      setNotes('');
+      toast('Request sent! The owner will review it soon.');
+    } catch (err) {
+      setFormError(err.message || 'Failed to submit request');
     } finally {
       setSubmitting(false);
     }
   };
 
-  if (loading) {
-    return <LoadingScreen />;
-  }
+  if (loading) return <Loader />;
+  if (error || !item) return <ErrorState message={error || 'Item not found'} onRetry={() => { setLoading(true); loadItem(); }} />;
 
-  if (!item) {
-    return null;
-  }
-
-  const isOwner = user && item.user && user.id === item.user.id;
+  const isOwner = user && item.user && Number(user.id) === Number(item.user.id);
   const images = item.images || [];
+  const imageHeight = Math.round(Math.min(contentWidth * 0.75, 420));
+  const days = daysBetween(startDate, endDate);
+  const estimate = !item.is_free && days > 0 ? (Number(item.daily_rate) * days).toFixed(2) : null;
+
+  const scrollToImage = (i) => {
+    const next = Math.max(0, Math.min(images.length - 1, i));
+    carouselRef.current?.scrollTo({ x: next * contentWidth, animated: true });
+    setImageIndex(next);
+  };
 
   return (
     <View style={styles.container}>
-      <ScrollView>
-        <ScrollView
-          horizontal
-          pagingEnabled
-          showsHorizontalScrollIndicator={false}
-          style={styles.imageCarousel}
-        >
-          {images.length > 0 ? (
-            images.map((image, index) => (
-              <Image
-                key={index}
-                source={{ uri: `${STORAGE_URL}/${image.image_path}` }}
-                style={styles.image}
-              />
-            ))
-          ) : (
-            <View style={[styles.image, styles.placeholderImage]}>
-              <Text style={styles.placeholderText}>No Image</Text>
-            </View>
-          )}
-        </ScrollView>
+      <ScrollView contentContainerStyle={{ paddingBottom: 24 }}>
+        <View style={[styles.centered, { width: contentWidth }]}>
+          <View>
+            <ScrollView
+              ref={carouselRef}
+              horizontal
+              pagingEnabled
+              showsHorizontalScrollIndicator={false}
+              scrollEventThrottle={16}
+              onMomentumScrollEnd={(e) => setImageIndex(Math.round(e.nativeEvent.contentOffset.x / contentWidth))}
+              onScroll={Platform.OS === 'web' ? (e) => setImageIndex(Math.round(e.nativeEvent.contentOffset.x / contentWidth)) : undefined}
+            >
+              {images.length > 0 ? (
+                images.map((img) => (
+                  <ItemImage key={img.id} uri={imageUrl(img.image_path)} style={{ width: contentWidth, height: imageHeight }} iconSize={48} />
+                ))
+              ) : (
+                <ItemImage uri={null} style={{ width: contentWidth, height: imageHeight }} iconSize={48} />
+              )}
+            </ScrollView>
 
-        <View style={styles.content}>
-          <Text style={styles.title}>{item.title}</Text>
-          
-          <View style={styles.infoRow}>
-            <Text style={styles.category}>{item.category?.name}</Text>
-            <Text style={styles.location}>{item.location}</Text>
-          </View>
-
-          <View style={styles.priceContainer}>
-            {item.is_free ? (
-              <Text style={styles.priceFree}>FREE</Text>
-            ) : (
-              <Text style={styles.price}>${item.daily_rate}/day</Text>
-            )}
-          </View>
-
-          <Text style={styles.sectionTitle}>Description</Text>
-          <Text style={styles.description}>{item.description}</Text>
-
-          <Text style={styles.sectionTitle}>Owner</Text>
-          <Text style={styles.ownerName}>{item.user?.name}</Text>
-
-          {item.booked_dates && item.booked_dates.length > 0 && (
-            <>
-              <Text style={styles.sectionTitle}>Booked Dates</Text>
-              {item.booked_dates.map((booking, index) => (
-                <View key={index} style={styles.bookedDate}>
-                  <Text style={styles.bookedDateText}>
-                    {booking.start_date} to {booking.end_date}
-                  </Text>
+            {images.length > 1 ? (
+              <>
+                <View style={styles.dots}>
+                  {images.map((img, i) => (
+                    <Pressable key={img.id} onPress={() => scrollToImage(i)} hitSlop={6}>
+                      <View style={[styles.dot, i === imageIndex && styles.dotActive]} />
+                    </Pressable>
+                  ))}
                 </View>
-              ))}
-            </>
-          )}
+                {imageIndex > 0 ? (
+                  <IconButton icon="chevron-back" onPress={() => scrollToImage(imageIndex - 1)} style={[styles.arrow, { left: 12, top: imageHeight / 2 - 20 }]} accessibilityLabel="Previous image" />
+                ) : null}
+                {imageIndex < images.length - 1 ? (
+                  <IconButton icon="chevron-forward" onPress={() => scrollToImage(imageIndex + 1)} style={[styles.arrow, { right: 12, top: imageHeight / 2 - 20 }]} accessibilityLabel="Next image" />
+                ) : null}
+              </>
+            ) : null}
+          </View>
+
+          <View style={styles.content}>
+            <View style={styles.tagRow}>
+              <View style={styles.categoryTag}>
+                <Text style={styles.categoryText}>{item.category?.name}</Text>
+              </View>
+              {item.is_available === false ? (
+                <View style={[styles.categoryTag, { backgroundColor: colors.dangerLight }]}>
+                  <Text style={[styles.categoryText, { color: colors.danger }]}>Unavailable</Text>
+                </View>
+              ) : null}
+            </View>
+
+            <Text style={styles.title}>{item.title}</Text>
+
+            <View style={styles.metaRow}>
+              <Ionicons name="location-outline" size={16} color={colors.textSecondary} />
+              <Text style={styles.metaText}>{item.location}</Text>
+            </View>
+
+            <View style={{ marginTop: spacing.lg }}>
+              <PriceTag item={item} large />
+            </View>
+
+            <Card style={styles.section}>
+              <Text style={styles.sectionTitle}>About this item</Text>
+              <Text style={styles.description}>{item.description}</Text>
+            </Card>
+
+            <Card style={[styles.section, styles.ownerRow]}>
+              <Avatar name={item.user?.name} size={44} />
+              <View style={{ flex: 1, marginLeft: spacing.md }}>
+                <Text style={styles.ownerLabel}>Listed by</Text>
+                <Text style={styles.ownerName}>{isOwner ? 'You' : item.user?.name}</Text>
+              </View>
+              <Ionicons name="shield-checkmark" size={20} color={colors.primary} />
+            </Card>
+
+            <Card style={styles.section}>
+              <Text style={styles.sectionTitle}>Availability</Text>
+              {item.booked_dates?.length ? (
+                item.booked_dates.map((b, i) => (
+                  <View key={i} style={styles.bookedRow}>
+                    <Ionicons name="calendar" size={16} color={colors.danger} />
+                    <Text style={styles.bookedText}>Booked {formatRange(b.start_date, b.end_date)}</Text>
+                  </View>
+                ))
+              ) : (
+                <View style={styles.bookedRow}>
+                  <Ionicons name="checkmark-circle" size={16} color={colors.success} />
+                  <Text style={[styles.bookedText, { color: colors.success }]}>No bookings yet — all dates open</Text>
+                </View>
+              )}
+            </Card>
+          </View>
         </View>
       </ScrollView>
 
-      {!isOwner && (
-        <View style={styles.footer}>
-          <Button
-            title="Request to Borrow"
-            onPress={() => setShowRequestModal(true)}
-          />
+      <View style={[styles.footer, { paddingBottom: Math.max(insets.bottom, 12) }]}>
+        <View style={[styles.footerInner, { maxWidth: CONTENT_MAX_WIDTH }]}>
+          {isOwner ? (
+            <Button title="Edit listing" icon="create-outline" variant="secondary" onPress={() => navigation.navigate('CreateItem', { item })} />
+          ) : (
+            <Button title="Request to borrow" icon="calendar-outline" onPress={openSheet} disabled={item.is_available === false} />
+          )}
         </View>
-      )}
+      </View>
 
-      <Modal
-        visible={showRequestModal}
-        animationType="slide"
-        transparent={true}
-        onRequestClose={() => setShowRequestModal(false)}
-      >
-        <View style={styles.modalContainer}>
-          <View style={styles.modalContent}>
-            <Text style={styles.modalTitle}>Request to Borrow</Text>
+      <Modal visible={sheetOpen} transparent animationType="slide" onRequestClose={() => setSheetOpen(false)} statusBarTranslucent>
+        <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+          <Pressable style={styles.backdrop} onPress={() => !submitting && setSheetOpen(false)}>
+            <Pressable style={[styles.sheet, { paddingBottom: Math.max(insets.bottom, 16) + 8 }]} onPress={() => {}}>
+              <ScrollView keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
+                <View style={styles.sheetHandle} />
+                <View style={styles.sheetHeader}>
+                  <Text style={styles.sheetTitle}>Request to borrow</Text>
+                  <IconButton icon="close" onPress={() => setSheetOpen(false)} bg={colors.surfaceAlt} size={36} accessibilityLabel="Close" />
+                </View>
+                <Text style={styles.sheetSubtitle} numberOfLines={1}>
+                  {item.title}
+                </Text>
 
-            <TouchableOpacity
-              style={styles.dateButton}
-              onPress={() => setShowStartPicker(true)}
-            >
-              <Text style={styles.dateLabel}>Start Date:</Text>
-              <Text style={styles.dateValue}>{formatDate(startDate)}</Text>
-            </TouchableOpacity>
+                {formError ? (
+                  <View style={styles.formError}>
+                    <Ionicons name="alert-circle" size={18} color={colors.danger} />
+                    <Text style={styles.formErrorText}>{formError}</Text>
+                  </View>
+                ) : null}
 
-            {showStartPicker && (
-              <DateTimePicker
-                value={startDate}
-                mode="date"
-                display="default"
-                onChange={(event, selectedDate) => {
-                  setShowStartPicker(Platform.OS === 'ios');
-                  if (selectedDate) {
-                    setStartDate(selectedDate);
-                  }
-                }}
-                minimumDate={new Date()}
-              />
-            )}
+                <View style={styles.dateRow}>
+                  <DateField
+                    label="Start date"
+                    value={startDate}
+                    minimumDate={new Date()}
+                    onChange={(v) => {
+                      setStartDate(v);
+                      if (parseYMD(endDate) < parseYMD(v)) setEndDate(v);
+                      setFormError('');
+                    }}
+                    style={{ flex: 1 }}
+                  />
+                  <DateField
+                    label="End date"
+                    value={endDate}
+                    minimumDate={parseYMD(startDate) || new Date()}
+                    onChange={(v) => {
+                      setEndDate(v);
+                      setFormError('');
+                    }}
+                    style={{ flex: 1 }}
+                  />
+                </View>
 
-            <TouchableOpacity
-              style={styles.dateButton}
-              onPress={() => setShowEndPicker(true)}
-            >
-              <Text style={styles.dateLabel}>End Date:</Text>
-              <Text style={styles.dateValue}>{formatDate(endDate)}</Text>
-            </TouchableOpacity>
+                <Input
+                  label="Message to owner (optional)"
+                  icon="chatbubble-ellipses-outline"
+                  value={notes}
+                  onChangeText={setNotes}
+                  placeholder="Hi! I'd like to borrow this for…"
+                  multiline
+                />
 
-            {showEndPicker && (
-              <DateTimePicker
-                value={endDate}
-                mode="date"
-                display="default"
-                onChange={(event, selectedDate) => {
-                  setShowEndPicker(Platform.OS === 'ios');
-                  if (selectedDate) {
-                    setEndDate(selectedDate);
-                  }
-                }}
-                minimumDate={startDate}
-              />
-            )}
+                <View style={styles.summary}>
+                  <Text style={styles.summaryText}>
+                    {days > 0 ? `${days} ${days === 1 ? 'day' : 'days'}` : '—'}
+                  </Text>
+                  <Text style={styles.summaryTotal}>{item.is_free ? 'Free' : estimate ? `$${estimate} est.` : '—'}</Text>
+                </View>
 
-            <TextInput
-              style={styles.notesInput}
-              placeholder="Notes (optional)"
-              value={notes}
-              onChangeText={setNotes}
-              multiline
-              numberOfLines={3}
-            />
-
-            <Button
-              title="Submit Request"
-              onPress={handleSubmitRequest}
-              loading={submitting}
-              style={styles.submitButton}
-            />
-
-            <Button
-              title="Cancel"
-              onPress={() => setShowRequestModal(false)}
-              variant="secondary"
-            />
-          </View>
-        </View>
+                <Button title="Send request" icon="paper-plane-outline" onPress={handleSubmitRequest} loading={submitting} />
+              </ScrollView>
+            </Pressable>
+          </Pressable>
+        </KeyboardAvoidingView>
       </Modal>
     </View>
   );
 };
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#fff',
-  },
-  imageCarousel: {
-    height: 300,
-  },
-  image: {
-    width: 400,
-    height: 300,
-    resizeMode: 'cover',
-  },
-  placeholderImage: {
-    backgroundColor: '#e0e0e0',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  placeholderText: {
-    color: '#999',
-    fontSize: 18,
-  },
-  content: {
-    padding: 16,
-  },
-  title: {
-    fontSize: 24,
-    fontWeight: 'bold',
-    marginBottom: 12,
-    color: '#333',
-  },
-  infoRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    marginBottom: 12,
-  },
-  category: {
-    fontSize: 16,
-    color: '#007AFF',
-  },
-  location: {
-    fontSize: 16,
-    color: '#666',
-  },
-  priceContainer: {
-    marginBottom: 20,
-  },
-  price: {
-    fontSize: 28,
-    fontWeight: 'bold',
-    color: '#007AFF',
-  },
-  priceFree: {
-    fontSize: 28,
-    fontWeight: 'bold',
-    color: '#34C759',
-  },
-  sectionTitle: {
-    fontSize: 18,
-    fontWeight: '600',
-    marginTop: 16,
-    marginBottom: 8,
-    color: '#333',
-  },
-  description: {
-    fontSize: 16,
-    lineHeight: 24,
-    color: '#666',
-  },
-  ownerName: {
-    fontSize: 16,
-    color: '#666',
-  },
-  bookedDate: {
-    backgroundColor: '#FFE5E5',
-    padding: 12,
-    borderRadius: 8,
-    marginBottom: 8,
-  },
-  bookedDateText: {
-    color: '#FF3B30',
-    fontWeight: '600',
-  },
+  container: { flex: 1, backgroundColor: colors.background },
+  centered: { alignSelf: 'center' },
+  dots: { position: 'absolute', bottom: 12, alignSelf: 'center', flexDirection: 'row', gap: 6 },
+  dot: { width: 7, height: 7, borderRadius: 4, backgroundColor: 'rgba(255,255,255,0.6)' },
+  dotActive: { width: 20, backgroundColor: colors.surface },
+  arrow: { position: 'absolute', opacity: 0.9 },
+  content: { padding: spacing.lg },
+  tagRow: { flexDirection: 'row', gap: 8 },
+  categoryTag: { backgroundColor: colors.primaryLight, paddingHorizontal: 10, paddingVertical: 4, borderRadius: radius.full },
+  categoryText: { ...typography.caption, color: colors.primary, fontWeight: '700' },
+  title: { ...typography.h1, color: colors.textPrimary, marginTop: spacing.md },
+  metaRow: { flexDirection: 'row', alignItems: 'center', gap: 4, marginTop: 6 },
+  metaText: { ...typography.body, color: colors.textSecondary },
+  section: { marginTop: spacing.lg },
+  sectionTitle: { ...typography.h3, color: colors.textPrimary, marginBottom: spacing.sm },
+  description: { ...typography.body, color: colors.textSecondary, lineHeight: 23 },
+  ownerRow: { flexDirection: 'row', alignItems: 'center' },
+  ownerLabel: { ...typography.caption, color: colors.textMuted },
+  ownerName: { ...typography.bodyStrong, color: colors.textPrimary },
+  bookedRow: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingVertical: 4 },
+  bookedText: { ...typography.bodySmall, color: colors.danger, fontWeight: '600' },
   footer: {
-    padding: 16,
+    paddingHorizontal: spacing.lg,
+    paddingTop: 12,
+    backgroundColor: colors.surface,
     borderTopWidth: 1,
-    borderTopColor: '#ddd',
+    borderTopColor: colors.border,
   },
-  modalContainer: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+  footerInner: { width: '100%', alignSelf: 'center' },
+  backdrop: { flex: 1, backgroundColor: colors.overlay, justifyContent: 'flex-end' },
+  sheet: {
+    backgroundColor: colors.surface,
+    borderTopLeftRadius: radius.xl,
+    borderTopRightRadius: radius.xl,
+    paddingHorizontal: spacing.xl,
+    paddingTop: spacing.sm,
+    maxHeight: '90%',
+    width: '100%',
+    maxWidth: 560,
+    alignSelf: 'center',
   },
-  modalContent: {
-    width: '90%',
-    backgroundColor: '#fff',
-    borderRadius: 12,
-    padding: 20,
+  sheetHandle: { width: 40, height: 4, borderRadius: 2, backgroundColor: colors.border, alignSelf: 'center', marginBottom: spacing.md },
+  sheetHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  sheetTitle: { ...typography.h2, color: colors.textPrimary },
+  sheetSubtitle: { ...typography.body, color: colors.textSecondary, marginBottom: spacing.lg },
+  dateRow: { flexDirection: 'row', gap: spacing.md },
+  formError: {
+    flexDirection: 'row',
+    gap: 8,
+    backgroundColor: colors.dangerLight,
+    padding: spacing.md,
+    borderRadius: radius.md,
+    marginBottom: spacing.lg,
   },
-  modalTitle: {
-    fontSize: 20,
-    fontWeight: 'bold',
-    marginBottom: 20,
-    textAlign: 'center',
-  },
-  dateButton: {
+  formErrorText: { ...typography.bodySmall, color: colors.danger, fontWeight: '600', flex: 1 },
+  summary: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    padding: 12,
-    borderWidth: 1,
-    borderColor: '#ddd',
-    borderRadius: 8,
-    marginBottom: 12,
+    backgroundColor: colors.surfaceAlt,
+    borderRadius: radius.md,
+    padding: spacing.md,
+    marginBottom: spacing.lg,
   },
-  dateLabel: {
-    fontSize: 16,
-    fontWeight: '600',
-  },
-  dateValue: {
-    fontSize: 16,
-    color: '#007AFF',
-  },
-  notesInput: {
-    borderWidth: 1,
-    borderColor: '#ddd',
-    borderRadius: 8,
-    padding: 12,
-    marginBottom: 16,
-    minHeight: 80,
-    textAlignVertical: 'top',
-  },
-  submitButton: {
-    marginBottom: 12,
-  },
+  summaryText: { ...typography.bodyStrong, color: colors.textSecondary },
+  summaryTotal: { ...typography.h3, color: colors.primary },
 });

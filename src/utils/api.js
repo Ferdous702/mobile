@@ -1,146 +1,177 @@
 import { API_URL } from '../config/api';
 import { storage } from './storage';
 
+const REQUEST_TIMEOUT_MS = 20000;
+
+export class ApiError extends Error {
+  constructor(message, status = 0, errors = null) {
+    super(message);
+    this.name = 'ApiError';
+    this.status = status;
+    this.errors = errors;
+  }
+}
+
+const firstValidationError = (errors) => {
+  if (!errors || typeof errors !== 'object') return null;
+  const first = Object.values(errors)[0];
+  return Array.isArray(first) ? first[0] : first || null;
+};
+
 class ApiService {
-  async request(endpoint, options = {}) {
-    const token = await storage.getToken();
-    
-    const headers = {
-      'Content-Type': 'application/json',
-      ...options.headers,
-    };
+  onUnauthorized = null;
 
-    if (token) {
-      headers['Authorization'] = `Bearer ${token}`;
-    }
-
-    // Remove Content-Type for FormData
-    if (options.body instanceof FormData) {
-      delete headers['Content-Type'];
-    }
-
-    try {
-      const response = await fetch(`${API_URL}${endpoint}`, {
-        ...options,
-        headers,
-      });
-
-      const data = await response.json();
-
-      if (!response.ok) {
-        throw new Error(data.message || 'Something went wrong');
-      }
-
-      return data;
-    } catch (error) {
-      throw error;
-    }
+  setUnauthorizedHandler(handler) {
+    this.onUnauthorized = handler;
   }
 
-  // Auth endpoints
-  async register(name, email, password, passwordConfirmation) {
+  async request(endpoint, { method = 'GET', body, headers = {} } = {}) {
+    const token = await storage.getToken();
+    const isFormData = typeof FormData !== 'undefined' && body instanceof FormData;
+
+    const finalHeaders = { Accept: 'application/json', ...headers };
+    if (!isFormData && body !== undefined) finalHeaders['Content-Type'] = 'application/json';
+    if (token) finalHeaders.Authorization = `Bearer ${token}`;
+
+    const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    const timer = controller ? setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS) : null;
+
+    let response;
+    try {
+      response = await fetch(`${API_URL}${endpoint}`, {
+        method,
+        headers: finalHeaders,
+        body: isFormData ? body : body !== undefined ? JSON.stringify(body) : undefined,
+        signal: controller?.signal,
+      });
+    } catch (err) {
+      const timedOut = err?.name === 'AbortError';
+      throw new ApiError(
+        timedOut
+          ? 'The server took too long to respond. Please try again.'
+          : `Can't reach the server (${API_URL}). Make sure the backend is running with "php artisan serve --host=0.0.0.0" and your phone is on the same Wi-Fi.`,
+        0
+      );
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+
+    const text = await response.text();
+    let data = {};
+    try {
+      data = text ? JSON.parse(text) : {};
+    } catch {
+      data = {};
+    }
+
+    if (!response.ok || data.success === false) {
+      if (response.status === 401 && token && this.onUnauthorized) {
+        this.onUnauthorized();
+      }
+      const message =
+        firstValidationError(data.errors) ||
+        data.message ||
+        `Request failed (HTTP ${response.status})`;
+      throw new ApiError(message, response.status, data.errors || null);
+    }
+
+    return data;
+  }
+
+  // Auth
+  register(name, email, password, passwordConfirmation) {
     return this.request('/register', {
       method: 'POST',
-      body: JSON.stringify({
-        name,
-        email,
-        password,
-        password_confirmation: passwordConfirmation,
-      }),
+      body: { name, email, password, password_confirmation: passwordConfirmation },
     });
   }
 
-  async login(email, password) {
-    return this.request('/login', {
-      method: 'POST',
-      body: JSON.stringify({ email, password }),
-    });
+  login(email, password) {
+    return this.request('/login', { method: 'POST', body: { email, password } });
   }
 
-  async logout() {
+  logout() {
     return this.request('/logout', { method: 'POST' });
   }
 
-  async getUser() {
+  getUser() {
     return this.request('/user');
   }
 
-  // Category endpoints
-  async getCategories() {
+  // Categories
+  getCategories() {
     return this.request('/categories');
   }
 
-  // Item endpoints
-  async getItems(keyword = '', categoryId = '') {
-    let endpoint = '/items';
-    const params = new URLSearchParams();
-    
-    if (keyword) params.append('keyword', keyword);
-    if (categoryId) params.append('category_id', categoryId);
-    
-    const queryString = params.toString();
-    if (queryString) endpoint += `?${queryString}`;
-    
-    return this.request(endpoint);
+  // Items
+  getItems(keyword = '', categoryId = '') {
+    const params = [];
+    if (keyword) params.push(`keyword=${encodeURIComponent(keyword)}`);
+    if (categoryId) params.push(`category_id=${encodeURIComponent(categoryId)}`);
+    return this.request(`/items${params.length ? `?${params.join('&')}` : ''}`);
   }
 
-  async getItem(id) {
+  getItem(id) {
     return this.request(`/items/${id}`);
   }
 
-  async createItem(formData) {
-    return this.request('/items', {
-      method: 'POST',
-      body: formData,
-    });
+  createItem(formData) {
+    return this.request('/items', { method: 'POST', body: formData });
   }
 
-  async updateItem(id, formData) {
-    return this.request(`/items/${id}`, {
-      method: 'PUT',
-      body: formData,
-    });
+  // PHP can't parse multipart bodies on PUT, so use Laravel method spoofing.
+  updateItem(id, formData) {
+    formData.append('_method', 'PUT');
+    return this.request(`/items/${id}`, { method: 'POST', body: formData });
   }
 
-  async deleteItem(id) {
+  deleteItem(id) {
     return this.request(`/items/${id}`, { method: 'DELETE' });
   }
 
-  async getMyItems() {
+  getMyItems() {
     return this.request('/my-items');
   }
 
-  // Borrow request endpoints
-  async createBorrowRequest(itemListingId, startDate, endDate, notes = '') {
+  // Borrow requests
+  createBorrowRequest(itemListingId, startDate, endDate, notes = '') {
     return this.request('/borrow-requests', {
       method: 'POST',
-      body: JSON.stringify({
-        item_listing_id: itemListingId,
-        start_date: startDate,
-        end_date: endDate,
-        notes,
-      }),
+      body: { item_listing_id: itemListingId, start_date: startDate, end_date: endDate, notes },
     });
   }
 
-  async getReceivedRequests(status = '') {
-    let endpoint = '/borrow-requests/received';
-    if (status) endpoint += `?status=${status}`;
-    return this.request(endpoint);
+  getReceivedRequests() {
+    return this.request('/borrow-requests/received');
   }
 
-  async getSentRequests(status = '') {
-    let endpoint = '/borrow-requests/sent';
-    if (status) endpoint += `?status=${status}`;
-    return this.request(endpoint);
+  getSentRequests() {
+    return this.request('/borrow-requests/sent');
   }
 
-  async acceptRequest(id) {
+  acceptRequest(id) {
     return this.request(`/borrow-requests/${id}/accept`, { method: 'PUT' });
   }
 
-  async rejectRequest(id) {
+  rejectRequest(id) {
     return this.request(`/borrow-requests/${id}/reject`, { method: 'PUT' });
+  }
+
+  // Admin
+  getAdminUsers() {
+    return this.request('/admin/users?per_page=100');
+  }
+
+  getAdminItems() {
+    return this.request('/admin/items?per_page=100');
+  }
+
+  adminDeleteItem(id) {
+    return this.request(`/admin/items/${id}`, { method: 'DELETE' });
+  }
+
+  adminDeleteUser(id) {
+    return this.request(`/admin/users/${id}`, { method: 'DELETE' });
   }
 }
 

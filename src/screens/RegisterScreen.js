@@ -1,158 +1,120 @@
-import React, { useState } from 'react';
-import {
-  View,
-  Text,
-  StyleSheet,
-  TouchableOpacity,
-  Alert,
-  ScrollView,
-  KeyboardAvoidingView,
-  Platform,
-} from 'react-native';
+import React, { useRef, useState } from 'react';
+import { View, Text, StyleSheet, Pressable, Platform } from 'react-native';
 import { useAuth } from '../contexts/AuthContext';
 import { Input } from '../components/Input';
 import { Button } from '../components/Button';
+import { AuthLayout, FormError } from '../components/AuthLayout';
+import { colors, typography } from '../theme';
+
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 export const RegisterScreen = ({ navigation }) => {
-  const [name, setName] = useState('');
-  const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('');
-  const [passwordConfirmation, setPasswordConfirmation] = useState('');
+  const [form, setForm] = useState({ name: '', email: '', password: '', confirm: '' });
+  const [errors, setErrors] = useState({});
+  const [formError, setFormError] = useState('');
   const [loading, setLoading] = useState(false);
   const { register } = useAuth();
+  const emailRef = useRef(null);
+  const passwordRef = useRef(null);
+  const confirmRef = useRef(null);
+
+  const update = (key) => (value) => {
+    setForm((f) => ({ ...f, [key]: value }));
+    if (errors[key]) setErrors((e) => ({ ...e, [key]: null }));
+  };
 
   const handleRegister = async () => {
-    if (!name || !email || !password || !passwordConfirmation) {
-      Alert.alert('Error', 'Please fill in all fields');
-      return;
-    }
-
-    if (password !== passwordConfirmation) {
-      Alert.alert('Error', 'Passwords do not match');
-      return;
-    }
-
-    if (password.length < 8) {
-      Alert.alert('Error', 'Password must be at least 8 characters');
-      return;
-    }
+    const next = {};
+    if (!form.name.trim()) next.name = 'Enter your name';
+    if (!EMAIL_RE.test(form.email.trim())) next.email = 'Enter a valid email address';
+    if (form.password.length < 8) next.password = 'Use at least 8 characters';
+    if (form.confirm !== form.password) next.confirm = 'Passwords do not match';
+    setErrors(next);
+    setFormError('');
+    if (Object.keys(next).length) return;
 
     setLoading(true);
-    const result = await register(name, email, password, passwordConfirmation);
+    const result = await register(form.name, form.email, form.password, form.confirm);
     setLoading(false);
-
-    if (!result.success) {
-      Alert.alert('Registration Failed', result.message || 'Please try again');
-    }
+    if (!result.success) setFormError(result.message || 'Registration failed');
   };
 
   return (
-    <KeyboardAvoidingView
-      style={styles.container}
-      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+    <AuthLayout
+      title="Create account"
+      subtitle="It takes less than a minute"
+      footer={
+        <View style={styles.row}>
+          <Text style={styles.muted}>Already have an account? </Text>
+          <Pressable
+            onPress={() => (navigation.canGoBack() ? navigation.goBack() : navigation.navigate('Login'))}
+            hitSlop={10}
+            style={Platform.OS === 'web' && { cursor: 'pointer' }}
+          >
+            <Text style={styles.link}>Sign in</Text>
+          </Pressable>
+        </View>
+      }
     >
-      <ScrollView contentContainerStyle={styles.scrollContent}>
-        <View style={styles.header}>
-          <Text style={styles.title}>Create Account</Text>
-          <Text style={styles.subtitle}>Join BorrowHub today</Text>
-        </View>
-
-        <View style={styles.form}>
-          <Input
-            label="Name"
-            value={name}
-            onChangeText={setName}
-            placeholder="Enter your name"
-          />
-
-          <Input
-            label="Email"
-            value={email}
-            onChangeText={setEmail}
-            placeholder="Enter your email"
-            keyboardType="email-address"
-            autoCapitalize="none"
-          />
-
-          <Input
-            label="Password"
-            value={password}
-            onChangeText={setPassword}
-            placeholder="Enter your password (min 8 characters)"
-            secureTextEntry
-            autoCapitalize="none"
-          />
-
-          <Input
-            label="Confirm Password"
-            value={passwordConfirmation}
-            onChangeText={setPasswordConfirmation}
-            placeholder="Confirm your password"
-            secureTextEntry
-            autoCapitalize="none"
-          />
-
-          <Button
-            title="Register"
-            onPress={handleRegister}
-            loading={loading}
-            style={styles.registerButton}
-          />
-
-          <View style={styles.loginContainer}>
-            <Text style={styles.loginText}>Already have an account? </Text>
-            <TouchableOpacity onPress={() => navigation.navigate('Login')}>
-              <Text style={styles.loginLink}>Login</Text>
-            </TouchableOpacity>
-          </View>
-        </View>
-      </ScrollView>
-    </KeyboardAvoidingView>
+      <FormError message={formError} />
+      <Input
+        label="Full name"
+        icon="person-outline"
+        value={form.name}
+        onChangeText={update('name')}
+        placeholder="Jane Doe"
+        autoComplete="name"
+        returnKeyType="next"
+        onSubmitEditing={() => emailRef.current?.focus()}
+        error={errors.name}
+      />
+      <Input
+        ref={emailRef}
+        label="Email"
+        icon="mail-outline"
+        value={form.email}
+        onChangeText={update('email')}
+        placeholder="you@example.com"
+        keyboardType="email-address"
+        autoCapitalize="none"
+        autoComplete="email"
+        returnKeyType="next"
+        onSubmitEditing={() => passwordRef.current?.focus()}
+        error={errors.email}
+      />
+      <Input
+        ref={passwordRef}
+        label="Password"
+        icon="lock-closed-outline"
+        value={form.password}
+        onChangeText={update('password')}
+        placeholder="At least 8 characters"
+        secureTextEntry
+        autoCapitalize="none"
+        returnKeyType="next"
+        onSubmitEditing={() => confirmRef.current?.focus()}
+        error={errors.password}
+      />
+      <Input
+        ref={confirmRef}
+        label="Confirm password"
+        icon="shield-checkmark-outline"
+        value={form.confirm}
+        onChangeText={update('confirm')}
+        placeholder="Repeat your password"
+        secureTextEntry
+        autoCapitalize="none"
+        returnKeyType="go"
+        onSubmitEditing={handleRegister}
+        error={errors.confirm}
+      />
+      <Button title="Create account" onPress={handleRegister} loading={loading} iconRight="arrow-forward" />
+    </AuthLayout>
   );
 };
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#fff',
-  },
-  scrollContent: {
-    flexGrow: 1,
-    justifyContent: 'center',
-    padding: 20,
-  },
-  header: {
-    alignItems: 'center',
-    marginBottom: 40,
-  },
-  title: {
-    fontSize: 32,
-    fontWeight: 'bold',
-    color: '#333',
-    marginBottom: 8,
-  },
-  subtitle: {
-    fontSize: 16,
-    color: '#666',
-  },
-  form: {
-    width: '100%',
-  },
-  registerButton: {
-    marginTop: 8,
-  },
-  loginContainer: {
-    flexDirection: 'row',
-    justifyContent: 'center',
-    marginTop: 20,
-  },
-  loginText: {
-    fontSize: 16,
-    color: '#666',
-  },
-  loginLink: {
-    fontSize: 16,
-    color: '#007AFF',
-    fontWeight: '600',
-  },
+  row: { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', justifyContent: 'center' },
+  muted: { ...typography.body, color: colors.textSecondary },
+  link: { ...typography.bodyStrong, color: colors.primary },
 });

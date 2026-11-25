@@ -1,161 +1,225 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   View,
   Text,
   FlatList,
   StyleSheet,
-  TouchableOpacity,
-  Image,
   RefreshControl,
   TextInput,
-  Alert,
+  ScrollView,
+  Pressable,
+  useWindowDimensions,
+  Platform,
 } from 'react-native';
-import { Picker } from '@react-native-picker/picker';
+import { useFocusEffect } from '@react-navigation/native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { Ionicons } from '@expo/vector-icons';
 import { api } from '../utils/api';
-import { STORAGE_URL } from '../config/api';
-import { LoadingScreen } from '../components/LoadingScreen';
+import { useAuth } from '../contexts/AuthContext';
+import { Card } from '../components/Card';
+import { Chip, PriceTag, ItemImage, EmptyState, ErrorState, Loader } from '../components/UI';
+import { primaryImageUrl } from '../utils/format';
+import { colors, typography, spacing, radius } from '../theme';
+
+const MAX_WIDTH = 1100;
+const GAP = 12;
+const PADDING = 16;
 
 export const HomeScreen = ({ navigation }) => {
+  const { user } = useAuth();
+  const insets = useSafeAreaInsets();
+  const { width } = useWindowDimensions();
+
   const [items, setItems] = useState([]);
   const [categories, setCategories] = useState([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
-  const [searchKeyword, setSearchKeyword] = useState('');
-  const [selectedCategory, setSelectedCategory] = useState('');
+  const [error, setError] = useState('');
+  const [keyword, setKeyword] = useState('');
+  const [categoryId, setCategoryId] = useState('');
+  const requestId = useRef(0);
+  const firstFocus = useRef(true);
 
+  const containerWidth = Math.min(width, MAX_WIDTH);
+  const columns = containerWidth >= 900 ? 4 : containerWidth >= 600 ? 3 : 2;
+  const cardWidth = Math.floor((containerWidth - PADDING * 2 - GAP * (columns - 1)) / columns);
+
+  const fetchItems = useCallback(async (kw, cat) => {
+    const id = ++requestId.current;
+    try {
+      const res = await api.getItems(kw.trim(), cat);
+      if (id === requestId.current) {
+        setItems(res.data || []);
+        setError('');
+      }
+    } catch (err) {
+      if (id === requestId.current) setError(err.message);
+    } finally {
+      if (id === requestId.current) setLoading(false);
+    }
+  }, []);
+
+  // Categories once
   useEffect(() => {
-    loadData();
+    api
+      .getCategories()
+      .then((res) => setCategories(res.data || []))
+      .catch(() => {});
   }, []);
 
-  const loadData = async () => {
-    try {
-      const [itemsRes, categoriesRes] = await Promise.all([
-        api.getItems(),
-        api.getCategories(),
-      ]);
+  // Refetch whenever the search text (debounced) or category changes
+  useEffect(() => {
+    const t = setTimeout(() => fetchItems(keyword, categoryId), keyword ? 350 : 0);
+    return () => clearTimeout(t);
+  }, [keyword, categoryId, fetchItems]);
 
-      if (itemsRes.success) {
-        setItems(itemsRes.data);
+  // Refresh silently when coming back to this tab (e.g. after creating a listing)
+  useFocusEffect(
+    useCallback(() => {
+      if (firstFocus.current) {
+        firstFocus.current = false;
+        return;
       }
+      fetchItems(keyword, categoryId);
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [fetchItems])
+  );
 
-      if (categoriesRes.success) {
-        setCategories(categoriesRes.data);
-      }
-    } catch (error) {
-      Alert.alert('Error', 'Failed to load items');
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleSearch = async () => {
-    setLoading(true);
-    try {
-      const response = await api.getItems(searchKeyword, selectedCategory);
-      if (response.success) {
-        setItems(response.data);
-      }
-    } catch (error) {
-      Alert.alert('Error', 'Failed to search items');
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const onRefresh = useCallback(async () => {
+  const onRefresh = async () => {
     setRefreshing(true);
-    await loadData();
+    await fetchItems(keyword, categoryId);
     setRefreshing(false);
-  }, []);
+  };
 
-  const renderItem = ({ item }) => {
-    const primaryImage = item.images?.find((img) => img.is_primary) || item.images?.[0];
-    const imageUrl = primaryImage
-      ? `${STORAGE_URL}/${primaryImage.image_path}`
-      : null;
+  const selectCategory = (id) => {
+    setLoading(true);
+    setCategoryId(id);
+  };
 
-    return (
-      <TouchableOpacity
-        style={styles.itemCard}
-        onPress={() => navigation.navigate('ItemDetails', { itemId: item.id })}
-      >
-        {imageUrl ? (
-          <Image source={{ uri: imageUrl }} style={styles.itemImage} />
-        ) : (
-          <View style={[styles.itemImage, styles.placeholderImage]}>
-            <Text style={styles.placeholderText}>No Image</Text>
-          </View>
-        )}
-        <View style={styles.itemInfo}>
-          <Text style={styles.itemTitle} numberOfLines={2}>
-            {item.title}
-          </Text>
-          <Text style={styles.itemCategory}>{item.category?.name}</Text>
-          <Text style={styles.itemLocation}>{item.location}</Text>
-          <View style={styles.itemFooter}>
-            {item.is_free ? (
-              <Text style={styles.itemPriceFree}>FREE</Text>
-            ) : (
-              <Text style={styles.itemPrice}>${item.daily_rate}/day</Text>
-            )}
+  const firstName = user?.name?.split(' ')[0] || 'there';
+
+  const header = (
+    <View>
+      <View style={[styles.hero, { paddingTop: insets.top + 16 }]}>
+        <View style={styles.heroInner}>
+          <Text style={styles.greeting}>Hi, {firstName} 👋</Text>
+          <Text style={styles.heroTitle}>What do you need today?</Text>
+
+          <View style={styles.search}>
+            <Ionicons name="search" size={18} color={colors.textMuted} />
+            <TextInput
+              style={[styles.searchInput, Platform.OS === 'web' && { outlineStyle: 'none' }]}
+              placeholder="Search drills, cameras, tents…"
+              placeholderTextColor={colors.textMuted}
+              value={keyword}
+              onChangeText={setKeyword}
+              returnKeyType="search"
+              onSubmitEditing={() => fetchItems(keyword, categoryId)}
+              autoCorrect={false}
+            />
+            {keyword ? (
+              <Pressable onPress={() => setKeyword('')} hitSlop={10} accessibilityLabel="Clear search">
+                <Ionicons name="close-circle" size={18} color={colors.textMuted} />
+              </Pressable>
+            ) : null}
           </View>
         </View>
-      </TouchableOpacity>
-    );
-  };
+      </View>
 
-  if (loading && !refreshing) {
-    return <LoadingScreen />;
-  }
+      <ScrollView
+        horizontal
+        showsHorizontalScrollIndicator={false}
+        contentContainerStyle={styles.chips}
+        style={styles.chipsScroll}
+      >
+        <Chip label="All" icon="apps-outline" selected={!categoryId} onPress={() => selectCategory('')} />
+        {categories.map((cat) => (
+          <Chip
+            key={cat.id}
+            label={cat.name}
+            selected={categoryId === String(cat.id)}
+            onPress={() => selectCategory(String(cat.id))}
+          />
+        ))}
+      </ScrollView>
+
+      {!loading && !error ? (
+        <View style={styles.resultsRow}>
+          <Text style={styles.resultsText}>
+            {items.length} {items.length === 1 ? 'item' : 'items'} available
+          </Text>
+        </View>
+      ) : null}
+    </View>
+  );
+
+  const renderItem = ({ item }) => (
+    <Card
+      padded={false}
+      style={[styles.itemCard, { width: cardWidth }]}
+      onPress={() => navigation.navigate('ItemDetails', { itemId: item.id })}
+      accessibilityLabel={item.title}
+    >
+      <View>
+        <ItemImage uri={primaryImageUrl(item)} style={[styles.itemImage, { height: Math.round(cardWidth * 0.8) }]} />
+        <View style={styles.priceFloat}>
+          <PriceTag item={item} />
+        </View>
+      </View>
+      <View style={styles.itemInfo}>
+        <Text style={styles.itemTitle} numberOfLines={1}>
+          {item.title}
+        </Text>
+        <Text style={styles.itemCategory} numberOfLines={1}>
+          {item.category?.name}
+        </Text>
+        <View style={styles.metaRow}>
+          <Ionicons name="location-outline" size={13} color={colors.textMuted} />
+          <Text style={styles.itemLocation} numberOfLines={1}>
+            {item.location}
+          </Text>
+        </View>
+      </View>
+    </Card>
+  );
 
   return (
     <View style={styles.container}>
-      <View style={styles.searchContainer}>
-        <TextInput
-          style={styles.searchInput}
-          placeholder="Search items..."
-          value={searchKeyword}
-          onChangeText={setSearchKeyword}
-          onSubmitEditing={handleSearch}
-        />
-        <TouchableOpacity style={styles.searchButton} onPress={handleSearch}>
-          <Text style={styles.searchButtonText}>Search</Text>
-        </TouchableOpacity>
-      </View>
-
-      <View style={styles.filterContainer}>
-        <Text style={styles.filterLabel}>Category:</Text>
-        <View style={styles.pickerContainer}>
-          <Picker
-            selectedValue={selectedCategory}
-            onValueChange={(value) => {
-              setSelectedCategory(value);
-              setSearchKeyword('');
-            }}
-            style={styles.picker}
-          >
-            <Picker.Item label="All Categories" value="" />
-            {categories.map((cat) => (
-              <Picker.Item key={cat.id} label={cat.name} value={cat.id.toString()} />
-            ))}
-          </Picker>
-        </View>
-      </View>
-
       <FlatList
-        data={items}
+        key={`cols-${columns}`}
+        data={loading || error ? [] : items}
         renderItem={renderItem}
-        keyExtractor={(item) => item.id.toString()}
-        numColumns={2}
+        keyExtractor={(item) => String(item.id)}
+        numColumns={columns}
         columnWrapperStyle={styles.row}
-        contentContainerStyle={styles.listContent}
-        refreshControl={
-          <RefreshControl refreshing={refreshing} onRefresh={onRefresh} />
-        }
+        ListHeaderComponent={header}
+        contentContainerStyle={[styles.list, { maxWidth: MAX_WIDTH }]}
+        style={styles.flex}
+        keyboardShouldPersistTaps="handled"
+        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={colors.primary} colors={[colors.primary]} />}
         ListEmptyComponent={
-          <View style={styles.emptyContainer}>
-            <Text style={styles.emptyText}>No items found</Text>
-          </View>
+          loading ? (
+            <View style={{ paddingTop: 60 }}>
+              <Loader />
+            </View>
+          ) : error ? (
+            <ErrorState message={error} onRetry={() => { setLoading(true); fetchItems(keyword, categoryId); }} />
+          ) : (
+            <EmptyState
+              icon="search-outline"
+              title="No items found"
+              message={keyword || categoryId ? 'Try a different search or category.' : 'Be the first to list something!'}
+              actionLabel={keyword || categoryId ? 'Clear filters' : 'List an item'}
+              onAction={() => {
+                if (keyword || categoryId) {
+                  setKeyword('');
+                  selectCategory('');
+                } else {
+                  navigation.navigate('MyListings', { screen: 'CreateItem' });
+                }
+              }}
+            />
+          )
         }
       />
     </View>
@@ -163,129 +227,40 @@ export const HomeScreen = ({ navigation }) => {
 };
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#f5f5f5',
+  flex: { flex: 1 },
+  container: { flex: 1, backgroundColor: colors.background },
+  list: { width: '100%', alignSelf: 'center', paddingBottom: 32 },
+  hero: {
+    backgroundColor: colors.primary,
+    paddingHorizontal: PADDING,
+    paddingBottom: 24,
+    borderBottomLeftRadius: 24,
+    borderBottomRightRadius: 24,
   },
-  searchContainer: {
-    flexDirection: 'row',
-    padding: 12,
-    backgroundColor: '#fff',
-    borderBottomWidth: 1,
-    borderBottomColor: '#ddd',
-  },
-  searchInput: {
-    flex: 1,
-    height: 40,
-    borderWidth: 1,
-    borderColor: '#ddd',
-    borderRadius: 8,
-    paddingHorizontal: 12,
-    marginRight: 8,
-  },
-  searchButton: {
-    backgroundColor: '#007AFF',
-    paddingHorizontal: 20,
-    borderRadius: 8,
-    justifyContent: 'center',
-  },
-  searchButtonText: {
-    color: '#fff',
-    fontWeight: '600',
-  },
-  filterContainer: {
+  heroInner: { width: '100%' },
+  greeting: { ...typography.bodyStrong, color: '#A7E3DA' },
+  heroTitle: { ...typography.h1, color: colors.textInverse, marginTop: 2, marginBottom: spacing.lg },
+  search: {
     flexDirection: 'row',
     alignItems: 'center',
-    padding: 12,
-    backgroundColor: '#fff',
-    borderBottomWidth: 1,
-    borderBottomColor: '#ddd',
+    backgroundColor: colors.surface,
+    borderRadius: radius.md,
+    paddingHorizontal: 14,
+    height: 50,
+    gap: 10,
   },
-  filterLabel: {
-    fontSize: 16,
-    fontWeight: '600',
-    marginRight: 12,
-  },
-  pickerContainer: {
-    flex: 1,
-    borderWidth: 1,
-    borderColor: '#ddd',
-    borderRadius: 8,
-  },
-  picker: {
-    height: 40,
-  },
-  listContent: {
-    padding: 8,
-  },
-  row: {
-    justifyContent: 'space-between',
-  },
-  itemCard: {
-    flex: 1,
-    backgroundColor: '#fff',
-    borderRadius: 12,
-    margin: 8,
-    overflow: 'hidden',
-    elevation: 2,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.1,
-    shadowRadius: 4,
-  },
-  itemImage: {
-    width: '100%',
-    height: 150,
-    resizeMode: 'cover',
-  },
-  placeholderImage: {
-    backgroundColor: '#e0e0e0',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  placeholderText: {
-    color: '#999',
-  },
-  itemInfo: {
-    padding: 12,
-  },
-  itemTitle: {
-    fontSize: 16,
-    fontWeight: '600',
-    marginBottom: 4,
-    color: '#333',
-  },
-  itemCategory: {
-    fontSize: 14,
-    color: '#666',
-    marginBottom: 4,
-  },
-  itemLocation: {
-    fontSize: 12,
-    color: '#999',
-    marginBottom: 8,
-  },
-  itemFooter: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-  },
-  itemPrice: {
-    fontSize: 16,
-    fontWeight: 'bold',
-    color: '#007AFF',
-  },
-  itemPriceFree: {
-    fontSize: 16,
-    fontWeight: 'bold',
-    color: '#34C759',
-  },
-  emptyContainer: {
-    padding: 40,
-    alignItems: 'center',
-  },
-  emptyText: {
-    fontSize: 16,
-    color: '#999',
-  },
+  searchInput: { flex: 1, ...typography.body, color: colors.textPrimary, height: '100%' },
+  chipsScroll: { flexGrow: 0 },
+  chips: { paddingHorizontal: PADDING, paddingTop: spacing.lg, paddingBottom: spacing.sm },
+  resultsRow: { paddingHorizontal: PADDING, paddingVertical: spacing.sm },
+  resultsText: { ...typography.caption, color: colors.textSecondary, textTransform: 'uppercase', letterSpacing: 0.6 },
+  row: { paddingHorizontal: PADDING, gap: GAP },
+  itemCard: { marginBottom: GAP, overflow: 'hidden' },
+  itemImage: { width: '100%' },
+  priceFloat: { position: 'absolute', left: 8, top: 8 },
+  itemInfo: { padding: spacing.md },
+  itemTitle: { ...typography.bodyStrong, color: colors.textPrimary },
+  itemCategory: { ...typography.caption, color: colors.primary, marginTop: 2 },
+  metaRow: { flexDirection: 'row', alignItems: 'center', marginTop: 6, gap: 3 },
+  itemLocation: { ...typography.caption, color: colors.textMuted, flex: 1 },
 });

@@ -1,155 +1,159 @@
-import React, { useState, useEffect, useCallback } from 'react';
-import {
-  View,
-  Text,
-  FlatList,
-  StyleSheet,
-  TouchableOpacity,
-  Image,
-  RefreshControl,
-  Alert,
-} from 'react-native';
+import React, { useState, useCallback, useLayoutEffect } from 'react';
+import { View, Text, FlatList, StyleSheet, RefreshControl } from 'react-native';
+import { useFocusEffect } from '@react-navigation/native';
+import { Ionicons } from '@expo/vector-icons';
 import { api } from '../utils/api';
-import { STORAGE_URL } from '../config/api';
-import { LoadingScreen } from '../components/LoadingScreen';
-import { Button } from '../components/Button';
+import { useDialog } from '../contexts/DialogContext';
+import { Card } from '../components/Card';
+import { Button, IconButton } from '../components/Button';
+import { ItemImage, PriceTag, EmptyState, ErrorState, Loader } from '../components/UI';
+import { primaryImageUrl } from '../utils/format';
+import { colors, typography, spacing, radius, CONTENT_MAX_WIDTH } from '../theme';
 
 export const MyListingsScreen = ({ navigation }) => {
+  const { confirm, toast, alert } = useDialog();
   const [items, setItems] = useState([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [error, setError] = useState('');
+  const [deletingId, setDeletingId] = useState(null);
 
-  useEffect(() => {
-    const unsubscribe = navigation.addListener('focus', () => {
-      loadMyItems();
-    });
-
-    return unsubscribe;
-  }, [navigation]);
-
-  const loadMyItems = async () => {
+  const loadMyItems = useCallback(async () => {
     try {
       const response = await api.getMyItems();
-      if (response.success) {
-        setItems(response.data);
-      }
-    } catch (error) {
-      Alert.alert('Error', 'Failed to load your items');
+      setItems(response.data || []);
+      setError('');
+    } catch (err) {
+      setError(err.message);
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
 
-  const onRefresh = useCallback(async () => {
+  useFocusEffect(
+    useCallback(() => {
+      loadMyItems();
+    }, [loadMyItems])
+  );
+
+  const handleCreateNew = useCallback(() => navigation.navigate('CreateItem'), [navigation]);
+
+  useLayoutEffect(() => {
+    navigation.setOptions({
+      headerRight: () => (
+        <IconButton icon="add" onPress={handleCreateNew} bg={colors.primaryLight} color={colors.primary} size={36} style={{ marginRight: 12 }} accessibilityLabel="New listing" />
+      ),
+    });
+  }, [navigation, handleCreateNew]);
+
+  const onRefresh = async () => {
     setRefreshing(true);
     await loadMyItems();
     setRefreshing(false);
-  }, []);
-
-  const handleDelete = (item) => {
-    Alert.alert(
-      'Delete Item',
-      `Are you sure you want to delete "${item.title}"?`,
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Delete',
-          style: 'destructive',
-          onPress: async () => {
-            try {
-              const response = await api.deleteItem(item.id);
-              if (response.success) {
-                Alert.alert('Success', 'Item deleted successfully');
-                loadMyItems();
-              }
-            } catch (error) {
-              Alert.alert('Error', 'Failed to delete item');
-            }
-          },
-        },
-      ]
-    );
   };
 
-  const renderItem = ({ item }) => {
-    const primaryImage = item.images?.find((img) => img.is_primary) || item.images?.[0];
-    const imageUrl = primaryImage
-      ? `${STORAGE_URL}/${primaryImage.image_path}`
-      : null;
+  const handleDelete = async (item) => {
+    const ok = await confirm({
+      title: 'Delete listing?',
+      message: `"${item.title}" and its photos will be permanently removed.`,
+      confirmText: 'Delete',
+      destructive: true,
+      icon: 'trash-outline',
+    });
+    if (!ok) return;
 
-    return (
-      <View style={styles.itemCard}>
-        <TouchableOpacity
-          style={styles.itemContent}
-          onPress={() => navigation.navigate('ItemDetails', { itemId: item.id })}
-        >
-          {imageUrl ? (
-            <Image source={{ uri: imageUrl }} style={styles.itemImage} />
-          ) : (
-            <View style={[styles.itemImage, styles.placeholderImage]}>
-              <Text style={styles.placeholderText}>No Image</Text>
-            </View>
-          )}
-          <View style={styles.itemInfo}>
-            <Text style={styles.itemTitle} numberOfLines={2}>
-              {item.title}
+    setDeletingId(item.id);
+    try {
+      await api.deleteItem(item.id);
+      setItems((prev) => prev.filter((i) => i.id !== item.id));
+      toast('Listing deleted');
+    } catch (err) {
+      alert('Could not delete', err.message);
+    } finally {
+      setDeletingId(null);
+    }
+  };
+
+  const renderItem = ({ item }) => (
+    <Card padded={false} style={styles.card}>
+      <Card padded={false} flat style={styles.cardInner} onPress={() => navigation.navigate('ItemDetails', { itemId: item.id })} accessibilityLabel={item.title}>
+        <ItemImage uri={primaryImageUrl(item)} style={styles.image} />
+        <View style={styles.info}>
+          <Text style={styles.title} numberOfLines={2}>
+            {item.title}
+          </Text>
+          <Text style={styles.category}>{item.category?.name}</Text>
+          <View style={styles.metaRow}>
+            <Ionicons name="location-outline" size={13} color={colors.textMuted} />
+            <Text style={styles.location} numberOfLines={1}>
+              {item.location}
             </Text>
-            <Text style={styles.itemCategory}>{item.category?.name}</Text>
-            <Text style={styles.itemLocation}>{item.location}</Text>
-            {item.is_free ? (
-              <Text style={styles.itemPriceFree}>FREE</Text>
-            ) : (
-              <Text style={styles.itemPrice}>${item.daily_rate}/day</Text>
-            )}
           </View>
-        </TouchableOpacity>
-
-        <View style={styles.actions}>
-          <TouchableOpacity
-            style={[styles.actionButton, styles.editButton]}
-            onPress={() => navigation.navigate('CreateItem', { item })}
-          >
-            <Text style={styles.actionButtonText}>Edit</Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={[styles.actionButton, styles.deleteButton]}
-            onPress={() => handleDelete(item)}
-          >
-            <Text style={styles.actionButtonText}>Delete</Text>
-          </TouchableOpacity>
+          <View style={{ marginTop: 8 }}>
+            <PriceTag item={item} />
+          </View>
         </View>
+        <Ionicons name="chevron-forward" size={18} color={colors.textMuted} style={{ alignSelf: 'center' }} />
+      </Card>
+      <View style={styles.actions}>
+        <Button
+          title="Edit"
+          icon="create-outline"
+          variant="secondary"
+          size="sm"
+          onPress={() => navigation.navigate('CreateItem', { item })}
+          style={styles.actionBtn}
+          fullWidth={false}
+        />
+        <Button
+          title="Delete"
+          icon="trash-outline"
+          variant="dangerOutline"
+          size="sm"
+          loading={deletingId === item.id}
+          onPress={() => handleDelete(item)}
+          style={styles.actionBtn}
+          fullWidth={false}
+        />
       </View>
-    );
-  };
+    </Card>
+  );
 
-  if (loading) {
-    return <LoadingScreen />;
-  }
+  if (loading) return <Loader />;
 
   return (
     <View style={styles.container}>
-      <View style={styles.header}>
-        <Button
-          title="+ Create New Listing"
-          onPress={() => navigation.navigate('CreateItem')}
-        />
-      </View>
-
       <FlatList
-        data={items}
+        data={error ? [] : items}
         renderItem={renderItem}
-        keyExtractor={(item) => item.id.toString()}
-        contentContainerStyle={styles.listContent}
-        refreshControl={
-          <RefreshControl refreshing={refreshing} onRefresh={onRefresh} />
+        keyExtractor={(item) => String(item.id)}
+        contentContainerStyle={styles.list}
+        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={colors.primary} colors={[colors.primary]} />}
+        ListHeaderComponent={
+          !error && items.length ? (
+            <View style={styles.header}>
+              <View>
+                <Text style={styles.headerTitle}>Your items</Text>
+                <Text style={styles.headerSub}>
+                  {items.length} active {items.length === 1 ? 'listing' : 'listings'}
+                </Text>
+              </View>
+              <Button title="New" icon="add" size="sm" onPress={handleCreateNew} fullWidth={false} />
+            </View>
+          ) : null
         }
         ListEmptyComponent={
-          <View style={styles.emptyContainer}>
-            <Text style={styles.emptyText}>No listings yet</Text>
-            <Text style={styles.emptySubtext}>
-              Create your first listing to start sharing items
-            </Text>
-          </View>
+          error ? (
+            <ErrorState message={error} onRetry={() => { setLoading(true); loadMyItems(); }} />
+          ) : (
+            <EmptyState
+              icon="cube-outline"
+              title="No listings yet"
+              message="Share something you own and earn from it — or lend it for free."
+              actionLabel="Create your first listing"
+              onAction={handleCreateNew}
+            />
+          )
         }
       />
     </View>
@@ -157,111 +161,27 @@ export const MyListingsScreen = ({ navigation }) => {
 };
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#f5f5f5',
-  },
-  header: {
-    padding: 16,
-    backgroundColor: '#fff',
-    borderBottomWidth: 1,
-    borderBottomColor: '#ddd',
-  },
-  listContent: {
-    padding: 16,
-  },
-  itemCard: {
-    backgroundColor: '#fff',
-    borderRadius: 12,
-    marginBottom: 16,
-    overflow: 'hidden',
-    elevation: 2,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.1,
-    shadowRadius: 4,
-  },
-  itemContent: {
-    flexDirection: 'row',
-    padding: 12,
-  },
-  itemImage: {
-    width: 100,
-    height: 100,
-    borderRadius: 8,
-    resizeMode: 'cover',
-  },
-  placeholderImage: {
-    backgroundColor: '#e0e0e0',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  placeholderText: {
-    color: '#999',
-  },
-  itemInfo: {
-    flex: 1,
-    marginLeft: 12,
-  },
-  itemTitle: {
-    fontSize: 16,
-    fontWeight: '600',
-    marginBottom: 4,
-    color: '#333',
-  },
-  itemCategory: {
-    fontSize: 14,
-    color: '#666',
-    marginBottom: 4,
-  },
-  itemLocation: {
-    fontSize: 12,
-    color: '#999',
-    marginBottom: 8,
-  },
-  itemPrice: {
-    fontSize: 16,
-    fontWeight: 'bold',
-    color: '#007AFF',
-  },
-  itemPriceFree: {
-    fontSize: 16,
-    fontWeight: 'bold',
-    color: '#34C759',
-  },
+  container: { flex: 1, backgroundColor: colors.background },
+  list: { padding: spacing.lg, width: '100%', maxWidth: CONTENT_MAX_WIDTH, alignSelf: 'center', flexGrow: 1 },
+  header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: spacing.lg },
+  headerTitle: { ...typography.h2, color: colors.textPrimary },
+  headerSub: { ...typography.bodySmall, color: colors.textSecondary },
+  card: { marginBottom: spacing.lg, overflow: 'hidden' },
+  cardInner: { flexDirection: 'row', padding: spacing.md },
+  image: { width: 92, height: 92, borderRadius: radius.md },
+  info: { flex: 1, marginLeft: spacing.md, marginRight: spacing.sm },
+  title: { ...typography.bodyStrong, color: colors.textPrimary },
+  category: { ...typography.caption, color: colors.primary, marginTop: 2 },
+  metaRow: { flexDirection: 'row', alignItems: 'center', gap: 3, marginTop: 4 },
+  location: { ...typography.caption, color: colors.textMuted, flex: 1 },
   actions: {
     flexDirection: 'row',
+    gap: spacing.sm,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.md,
     borderTopWidth: 1,
-    borderTopColor: '#ddd',
+    borderTopColor: colors.border,
+    backgroundColor: '#FAFBFC',
   },
-  actionButton: {
-    flex: 1,
-    padding: 12,
-    alignItems: 'center',
-  },
-  editButton: {
-    borderRightWidth: 1,
-    borderRightColor: '#ddd',
-  },
-  deleteButton: {},
-  actionButtonText: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: '#007AFF',
-  },
-  emptyContainer: {
-    padding: 40,
-    alignItems: 'center',
-  },
-  emptyText: {
-    fontSize: 18,
-    fontWeight: '600',
-    color: '#666',
-    marginBottom: 8,
-  },
-  emptySubtext: {
-    fontSize: 14,
-    color: '#999',
-    textAlign: 'center',
-  },
+  actionBtn: { flex: 1 },
 });
