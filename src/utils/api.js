@@ -49,7 +49,7 @@ class ApiService {
       throw new ApiError(
         timedOut
           ? 'The server took too long to respond. Please try again.'
-          : `Can't reach the server (${API_URL}). Make sure the backend is running with "php artisan serve --host=0.0.0.0" and your phone is on the same Wi-Fi.`,
+          : `Can't reach the server (${API_URL}). Make sure the backend is running and this API URL is reachable from your phone.`,
         0
       );
     } finally {
